@@ -1,3 +1,5 @@
+// src/graphManager.ts
+
 import * as Rivet from '@ironclad/rivet-node';
 import fs from 'fs/promises';
 import path from 'path';
@@ -49,8 +51,8 @@ export class GraphManager {
     this.config = params.config || {};
     this.modelContent = params.modelContent;
     this.streamedNodeIds = new Set();
-}
-
+  }
+  
 
   // Function to check if a string is a valid UUID
   private isValidUUID(id: string): boolean {
@@ -106,6 +108,7 @@ export class GraphManager {
         console.log('runGraph called with model file:', modelFilePath);
         projectContent = await fs.readFile(modelFilePath, 'utf8');
       }
+
   
       // Parse the YAML content into an object
       const parsedContent = yaml.parse(projectContent);
