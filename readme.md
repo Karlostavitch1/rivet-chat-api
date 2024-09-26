@@ -54,7 +54,12 @@ For simplicity all is explained for Visual Studio Code. You can of course run it
 1. Open "Terminal -> New Terminal" and enter ```npm install```
 1. Go to /.vscode/ folder
 1. Rename "launch_sample.json" to "launch.json"
-1. Open "launch.json" and replace the value for OPEN_API_KEY with your OpenAI Key
+1. rename ".env-example" to ".env" and replace the value for OPEN_API_KEY with your OpenAI Key. Enter Qdrant values of using datasets.
+
+### Alternate Docker setup
+Clone the repo
+Update docker-compose.yml and add api keys to env.
+docker-compose up
 
 ### Running the project
 Just press "Run -> Start Debugging" in Visual Studio Code.
