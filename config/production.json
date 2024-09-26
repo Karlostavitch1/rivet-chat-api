@@ -4,6 +4,7 @@
         "file": "./example.rivet-project",
         "graphName": "chat-history",
         "graphInputName": "input",
+        "userInputName": "userID",
         "streamingOutput": {
           "nodeType": "chat",
           "nodeName": "Output (Chat)"
@@ -16,6 +17,7 @@
         "file": "./example2.rivet-project",
         "graphName": "other_graph",
         "graphInputName": "input",
+        "userInputName": "userID",
         "streamingOutput": {
           "nodeType": "chat",
           "nodeName": "Output (Chat)"

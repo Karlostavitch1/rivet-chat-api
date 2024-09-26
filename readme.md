@@ -1,3 +1,5 @@
+*****THIS IS A CUSTOM VERSION WITH DEFAULT DATASETPROVIDER MAPPED TO QDRANT*****
+
 
 With this project you can use "Chatbot-UI" as user interface for your Rivet projects!
 This allows you to create complex LLM based processes (e.g. a teachable assistant) in a visual programming interface and interact with it via a beautiful chat UI. Chatbot-UI also keeps all the conversation history, so we do not need to care about that!
@@ -9,6 +11,8 @@ Features:
 - Transforms messages, before sending them to the rivet graph
 - Beautiful Chat-UI (provided by Chatbot-UI)
 - Chatbot-UI features: Multiple chats with conversation history, Integrated RAG etc.
+- Native Rivet DatasetProvider Mapped to Qdrant
+- OpenAI User parameter
 
 ![Chat UI for Rivet!](/chat_ui.png "Chat UI for Rivet!")
 

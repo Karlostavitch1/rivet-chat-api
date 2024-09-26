@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  app:
+    image: karlostavitch/rivet-chat-api
+    build: .
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./config:/usr/src/app/config
+      - ./rivet:/usr/src/app/rivet
+    environment:
+      - NODE_ENV=development
+      - OPENAI_API_KEY=your_openai_api_key
+      - RIVET_CHAT_API_KEY=your_rivet_chat_api_key
+      - QDRANT_URL=your_qdrant_url
+      - QDRANT_API_KEY=your_qdrant_api_key
+      - VECTOR_SIZE=your_vector_size
+    command: npm start

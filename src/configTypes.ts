@@ -3,6 +3,7 @@ export type ServerConfig = {
     file: string;
     graphName: string;
     graphInputName: string;
+    userInputName?: string;
     streamingOutput: {
         nodeType: string;
         nodeName: string;
