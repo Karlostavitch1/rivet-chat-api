@@ -1,9 +1,14 @@
+// src/graphManager.ts
 import * as Rivet from '@ironclad/rivet-node';
 import fs from 'fs/promises';
 import path from 'path';
 import { setupPlugins, logAvailablePluginsInfo } from './pluginConfiguration.js';
 import { delay } from './utils.js';
 import event from 'events';
+import { QdrantDatasetProvider } from './QdrantDatasetProvider.js';
+import yaml from 'yaml';
+import dotenv from 'dotenv';
+dotenv.config();
 logAvailablePluginsInfo();
 event.setMaxListeners(100);
 class DebuggerServer {
@@ -34,33 +39,75 @@ export class GraphManager {
         this.modelContent = params.modelContent;
         this.streamedNodeIds = new Set();
     }
-    async *runGraph(messages) {
+    // Function to check if a string is a valid UUID
+    isValidUUID(id) {
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        return uuidRegex.test(id);
+    }
+    // Initialize the DatasetProvider
+    static async initializeDatasetProvider() {
+        if (!GraphManager.datasetProvider) {
+            console.log('Initializing QdrantDatasetProvider...');
+            try {
+                GraphManager.datasetProvider = await QdrantDatasetProvider.create();
+                console.log('QdrantDatasetProvider initialized successfully.');
+            }
+            catch (error) {
+                console.error('Failed to initialize QdrantDatasetProvider:', error);
+                throw error;
+            }
+        }
+    }
+    // Debug helper function to log the project content and ID extraction
+    logProjectIdDetails(projectContent, projectId) {
+        console.log("-----------------------------------------------------");
+        console.log('Project Content (truncated):', projectContent.slice(0, 200), '...');
+        if (projectId) {
+            console.log(`Extracted projectId: ${projectId}`);
+        }
+        else {
+            console.log('No projectId found in the project content.');
+        }
+        console.log("-----------------------------------------------------");
+    }
+    async *runGraph(messages, user) {
         console.time('runGraph');
         let projectContent;
         // Ensure the DebuggerServer is started
         DebuggerServer.getInstance().startDebuggerServerIfNeeded();
         try {
-            // Dynamically setup plugins and retrieve their settings
             const pluginSettings = await setupPlugins(Rivet);
             if (this.modelContent) {
-                // Use direct model content if provided
+                // Use the provided model content if available
                 projectContent = this.modelContent;
             }
             else {
-                // Otherwise, read the model file from the filesystem
+                // Otherwise, load the model file from the filesystem using the config
                 const modelFilePath = path.resolve(process.cwd(), './rivet', this.config.file);
-                console.log("-----------------------------------------------------");
                 console.log('runGraph called with model file:', modelFilePath);
                 projectContent = await fs.readFile(modelFilePath, 'utf8');
             }
+            // Parse the YAML content into an object
+            const parsedContent = yaml.parse(projectContent);
+            // Navigate to the `metadata` section under `data`
+            let projectId;
+            if (parsedContent.data &&
+                parsedContent.data.metadata &&
+                parsedContent.data.metadata.id) {
+                projectId = parsedContent.data.metadata.id;
+                console.log(`Extracted projectId from data -> metadata: ${projectId}`);
+            }
+            else {
+                console.error("Error: Could not find a valid projectId in the data -> metadata section.");
+                throw new Error("Invalid projectId: No projectId found in the data -> metadata section.");
+            }
+            // Pass the entire project content to createProcessor
             const project = Rivet.loadProjectFromString(projectContent);
-            const graphInput = "input";
-            const datasetOptions = {
-                save: true,
-                // filePath should only be set if you're working with a file, adjust accordingly
-                filePath: this.modelContent ? undefined : path.resolve(process.cwd(), './rivet', this.config.file),
-            };
-            const datasetProvider = this.modelContent ? undefined : await Rivet.NodeDatasetProvider.fromProjectFile(datasetOptions.filePath, datasetOptions);
+            // Initialize the DatasetProvider
+            await GraphManager.initializeDatasetProvider();
+            // Proceed with the rest of the graph execution logic
+            const graphInput = this.config.graphInputName || "input";
+            const userInput = this.config.userInputName || "user";
             const options = {
                 graph: this.config.graphName,
                 inputs: {
@@ -71,10 +118,14 @@ export class GraphManager {
                             message: message.message,
                         })),
                     },
+                    [userInput]: {
+                        type: 'string',
+                        value: user,
+                    }
                 },
                 openAiKey: process.env.OPENAI_API_KEY,
                 remoteDebugger: DebuggerServer.getInstance().getDebuggerServer(),
-                datasetProvider: datasetProvider,
+                datasetProvider: GraphManager.datasetProvider,
                 pluginSettings,
                 context: {
                     ...Object.entries(process.env).reduce((acc, [key, value]) => {
@@ -83,51 +134,47 @@ export class GraphManager {
                     }, {}),
                 },
                 onUserEvent: {
-                    // Add "event" node and with id "debugger" to log data from Rivet to the server logs
                     debugger: (data) => {
-                        console.log(`Debugging data: ${JSON.stringify(data)}`);
                         return Promise.resolve();
                     }
                 }
             };
-            console.log("-----------------------------------------------------");
             console.log('Creating processor');
             const { processor, run } = Rivet.createProcessor(project, options);
             const runPromise = run();
             console.log('Starting to process events');
             let lastContent = '';
             for await (const event of processor.events()) {
-                // Handle 'partialOutput' events
-                if (event.type === 'partialOutput' && event.node?.title?.toLowerCase() === "output") {
-                    const content = event.outputs.response?.value || event.outputs.output?.value;
-                    if (content && content.startsWith(lastContent)) {
-                        const delta = content.slice(lastContent.length);
-                        yield delta;
-                        lastContent = content;
-                        this.streamedNodeIds.add(event.node.id); // Add node ID to the Set when streaming output
-                    }
-                }
-                // Modify 'nodeFinish' handling to check if node ID has already streamed output
-                else if (event.type === 'nodeFinish' &&
-                    event.node?.title?.toLowerCase() === "output" &&
-                    !event.node?.type?.includes('chat') &&
-                    !this.streamedNodeIds.has(event.node.id) // Check if the node ID is not in the streamedNodeIds Set
-                ) {
-                    try {
-                        let content = event.outputs.output.value || event.outputs.output.output;
-                        if (content) {
-                            if (typeof content !== 'string') {
-                                content = JSON.stringify(content);
-                            }
-                            // Stream the content character-by-character
-                            for (const char of content) {
-                                await delay(0.5); // Artificial delay to simulate streaming
-                                yield char;
-                            }
+                // Filter and log only events related to the node 'Output (Chat)'
+                if ('node' in event && event.node?.title === 'Output (Chat)') {
+                    if (event.type === 'partialOutput') {
+                        const content = event.outputs?.response?.value || event.outputs?.output?.value;
+                        if (content && content.startsWith(lastContent)) {
+                            const delta = content.slice(lastContent.length);
+                            yield delta;
+                            lastContent = content;
+                            this.streamedNodeIds.add(event.node.id); // Add node ID to the Set when streaming output
                         }
                     }
-                    catch (error) {
-                        console.error(`Error: Cannot return output from node of type ${event.node?.type}. This only works with certain nodes (e.g., text or object)`);
+                    else if (event.type === 'nodeFinish' &&
+                        !event.node?.type?.includes('chat') &&
+                        !this.streamedNodeIds.has(event.node.id) // Check if the node ID is not in the streamedNodeIds Set
+                    ) {
+                        try {
+                            let content = event.outputs?.output?.value || event.outputs?.output?.output;
+                            if (content) {
+                                if (typeof content !== 'string') {
+                                    content = JSON.stringify(content);
+                                }
+                                for (const char of content) {
+                                    await delay(0.5); // Artificial delay to simulate streaming
+                                    yield char;
+                                }
+                            }
+                        }
+                        catch (error) {
+                            console.error(`Error: Cannot return output from node of type ${event.node?.type}. This only works with certain nodes (e.g., text or object)`);
+                        }
                     }
                 }
             }
@@ -145,8 +192,8 @@ export class GraphManager {
         }
         finally {
             console.timeEnd('runGraph');
-            console.log("-----------------------------------------------------");
         }
     }
 }
+GraphManager.datasetProvider = null;
 //# sourceMappingURL=graphManager.js.map

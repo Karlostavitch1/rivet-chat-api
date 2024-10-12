@@ -4,13 +4,15 @@ import { GraphManager } from './graphManager.js';
 import morgan from 'morgan';
 import cors from 'cors';
 import dotenv from 'dotenv';
-dotenv.config();
+import { v5 as uuidv5 } from 'uuid';  // Import v5 from uuid
 
+dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3100;
 const environment = process.env.NODE_ENV;
 const apiKey = process.env.RIVET_CHAT_API_KEY;
+const UUID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';  // Example namespace
 
 app.use(express.json());
 app.use(morgan('combined'));
@@ -41,7 +43,7 @@ app.post('/chat/completions', async (req, res) => {
     const user = req.body.user;
   
     if (!modelId || !messages || !Array.isArray(messages) || !user) {
-      return res.status(400).json({ message: 'Invalid input data' });
+        return res.status(400).json({ message: 'Invalid input data' });
     }
   
     const processedMessages = messages.map(({ role: type, content: message }) => ({ type, message }));
@@ -49,7 +51,6 @@ app.post('/chat/completions', async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Transfer-Encoding', 'chunked');
   
-    // Load configuration based on the model
     const servers: { file: string }[] = config.get('servers');
     const serverConfig = servers.find(server => server.file === modelId);
     if (!serverConfig) {
@@ -57,54 +58,65 @@ app.post('/chat/completions', async (req, res) => {
     }
   
     const commonData = {
-      id: 'chatcmpl-mockId12345',
-      object: 'chat.completion.chunk',
-      created: Date.now(),
-      model: modelId,
-      system_fingerprint: null,
+        id: 'chatcmpl-mockId12345',
+        object: 'chat.completion.chunk',
+        created: Date.now(),
+        model: modelId,
+        system_fingerprint: null,
     };
   
-    // Function to process and send chunks
     async function processAndSendChunks(graphManager) {
-      let isFirstChunk = true;
-      let previousChunk = null;
-      let accumulatedContent = "";
+        let isFirstChunk = true;
+        let previousChunk = null;
+        let accumulatedContent = "";
   
-      for await (const chunk of graphManager.runGraph(processedMessages, user)) {
-        console.log('Chunk received:', chunk); // Debug log
+        for await (const chunk of graphManager.runGraph(processedMessages, user)) {
+            console.log('Chunk received:', chunk); // Debug log
   
-        if (isFirstChunk) {
-          isFirstChunk = false;
-          previousChunk = { role: "assistant", content: chunk };
-        } else {
-          if (previousChunk !== null) {
-            const chunkData = {
-              ...commonData,
-              choices: [{ index: 0, delta: previousChunk, logprobs: null, finish_reason: null }],
-            };
-            res.write(`data: ${JSON.stringify(chunkData)}\n\n`);
-            accumulatedContent += previousChunk.content;
-          }
-          previousChunk = { content: chunk };
+            if (isFirstChunk) {
+                isFirstChunk = false;
+                previousChunk = { role: "assistant", content: chunk };
+            } else {
+                if (previousChunk !== null) {
+                    const chunkData = {
+                        ...commonData,
+                        choices: [{ index: 0, delta: previousChunk, logprobs: null, finish_reason: null }],
+                    };
+                    res.write(`data: ${JSON.stringify(chunkData)}\n\n`);
+                    accumulatedContent += previousChunk.content;
+                }
+                previousChunk = { content: chunk };
+            }
         }
-      }
   
-      if (previousChunk !== null) {
-        accumulatedContent += previousChunk.content;
-        const lastChunkData = {
-          ...commonData,
-          choices: [{ index: 0, delta: previousChunk, logprobs: null, finish_reason: "stop" }],
-        };
-        res.write(`data: ${JSON.stringify(lastChunkData)}\n\n`);
-      }
+        if (previousChunk !== null) {
+            accumulatedContent += previousChunk.content;
+            const lastChunkData = {
+                ...commonData,
+                choices: [{ index: 0, delta: previousChunk, logprobs: null, finish_reason: "stop" }],
+            };
+            res.write(`data: ${JSON.stringify(lastChunkData)}\n\n`);
+        }
   
-      res.write('data: [DONE]\n\n');
-      res.end();
+        res.write('data: [DONE]\n\n');
+        res.end();
     }
   
     const graphManager = new GraphManager({ config: serverConfig });
     await processAndSendChunks(graphManager);
-  });
+});
+
+// New GET endpoint to generate UUID from a string
+app.get('/generate-uuid', (req, res) => {
+    const { inputString } = req.query; // Capture the input string from query parameters
+    if (!inputString) {
+        return res.status(400).json({ message: 'Input string is required' });
+    }
+
+    // Generate the UUID
+    const generatedUUID = uuidv5(inputString, UUID_NAMESPACE);
+    res.json({ uuid: generatedUUID });
+});
 
 // Listen on the configured port
 app.listen(Number(port), () => {

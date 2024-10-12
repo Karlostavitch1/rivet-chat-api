@@ -46,13 +46,23 @@ export class GraphManager {
   streamedNodeIds: Set<string>;
   private static datasetProvider: QdrantDatasetProvider | null = null;
   streamingOutputNodeName: string;
+  streamingOutputNodeType: string;
+  returnGraphOutput: boolean;
+  graphOutputName: string;
 
   constructor(params: { config?: any; modelContent?: string }) {
     this.config = params.config || {};
     this.modelContent = params.modelContent;
     this.streamedNodeIds = new Set();
+
+    // Extract streaming output settings from config
+    this.streamingOutputNodeName = this.config.streamingOutput?.nodeName || 'Output (Chat)';
+    this.streamingOutputNodeType = this.config.streamingOutput?.nodeType || 'chat';
+
+    // Extract output handling settings from config
+    this.returnGraphOutput = this.config.returnGraphOutput || false;
+    this.graphOutputName = this.config.graphOutputName || 'output';
   }
-  
 
   // Function to check if a string is a valid UUID
   private isValidUUID(id: string): boolean {
@@ -92,13 +102,13 @@ export class GraphManager {
   ) {
     console.time('runGraph');
     let projectContent: string;
-  
+
     // Ensure the DebuggerServer is started
     DebuggerServer.getInstance().startDebuggerServerIfNeeded();
-  
+
     try {
       const pluginSettings = await setupPlugins(Rivet);
-  
+
       if (this.modelContent) {
         // Use the provided model content if available
         projectContent = this.modelContent;
@@ -109,10 +119,9 @@ export class GraphManager {
         projectContent = await fs.readFile(modelFilePath, 'utf8');
       }
 
-  
       // Parse the YAML content into an object
       const parsedContent = yaml.parse(projectContent);
-  
+
       // Navigate to the `metadata` section under `data`
       let projectId: string | undefined;
       if (
@@ -130,17 +139,17 @@ export class GraphManager {
           "Invalid projectId: No projectId found in the data -> metadata section."
         );
       }
-  
+
       // Pass the entire project content to createProcessor
       const project = Rivet.loadProjectFromString(projectContent);
-  
+
       // Initialize the DatasetProvider
       await GraphManager.initializeDatasetProvider();
-  
+
       // Proceed with the rest of the graph execution logic
       const graphInput = this.config.graphInputName || "input";
       const userInput = this.config.userInputName || "user";
-  
+
       const options: Rivet.NodeRunGraphOptions = {
         graph: this.config.graphName,
         inputs: {
@@ -174,14 +183,14 @@ export class GraphManager {
           }
         }
       };
-  
+
       console.log('Creating processor');
       const { processor, run } = Rivet.createProcessor(project, options);
       const runPromise = run();
       console.log('Starting to process events');
-  
+
       let lastContent = '';
-  
+
       // Define the type for the event
       type Event = {
         type: string;
@@ -195,47 +204,60 @@ export class GraphManager {
           output?: { value: string; output: string };
         };
       };
-  
-      for await (const event of processor.events() as AsyncIterable<Event>) {
-        // Filter and log only events related to the node 'Output (Chat)'
-        if ('node' in event && event.node?.title === 'Output (Chat)') {
-          if (event.type === 'partialOutput') {
-            const content = event.outputs?.response?.value || event.outputs?.output?.value;
-            if (content && content.startsWith(lastContent)) {
-              const delta = content.slice(lastContent.length);
-              yield delta;
-              lastContent = content;
-              this.streamedNodeIds.add(event.node.id); // Add node ID to the Set when streaming output
-            }
-          } else if (
-            event.type === 'nodeFinish' &&
-            !event.node?.type?.includes('chat') &&
-            !this.streamedNodeIds.has(event.node.id) // Check if the node ID is not in the streamedNodeIds Set
-          ) {
-            try {
-              let content = event.outputs?.output?.value || event.outputs?.output?.output;
-              if (content) {
-                if (typeof content !== 'string') {
-                  content = JSON.stringify(content);
-                }
-                for (const char of content) {
-                  await delay(0.5); // Artificial delay to simulate streaming
-                  yield char;
-                }
+
+      if (!this.returnGraphOutput) {
+        // Streaming Output Handling
+        for await (const event of processor.events() as AsyncIterable<Event>) {
+          // Filter and log only events related to the configured streaming node
+          if ('node' in event && event.node?.title === this.streamingOutputNodeName) {
+            if (event.type === 'partialOutput') {
+              const content = event.outputs?.response?.value || event.outputs?.output?.value;
+              if (content && content.startsWith(lastContent)) {
+                const delta = content.slice(lastContent.length);
+                yield delta;
+                lastContent = content;
+                this.streamedNodeIds.add(event.node.id); // Add node ID to the Set when streaming output
               }
-            } catch (error) {
-              console.error(`Error: Cannot return output from node of type ${event.node?.type}. This only works with certain nodes (e.g., text or object)`);
+            } else if (
+              event.type === 'nodeFinish' &&
+              !event.node?.type?.includes(this.streamingOutputNodeType) &&
+              !this.streamedNodeIds.has(event.node.id) // Check if the node ID is not in the streamedNodeIds Set
+            ) {
+              try {
+                let content = event.outputs?.output?.value || event.outputs?.output?.output;
+                if (content) {
+                  if (typeof content !== 'string') {
+                    content = JSON.stringify(content);
+                  }
+                  for (const char of content) {
+                    await delay(0.5); // Artificial delay to simulate streaming
+                    yield char;
+                  }
+                }
+              } catch (error) {
+                console.error(`Error: Cannot return output from node of type ${event.node?.type}. This only works with certain nodes (e.g., text or object)`);
+              }
             }
           }
         }
+
+        console.log('Finished processing streaming events');
       }
-  
-      console.log('Finished processing events');
-  
+
       const finalOutputs = await runPromise;
-      if (finalOutputs && finalOutputs["output"]) {
-        yield finalOutputs["output"].value;
+
+      if (this.returnGraphOutput) {
+        // Handle Graph Output
+        if (finalOutputs && finalOutputs[this.graphOutputName]) {
+          yield finalOutputs[this.graphOutputName].value;
+        }
+      } else {
+        // Optionally handle final outputs even when streaming is enabled
+        if (finalOutputs && finalOutputs[this.graphOutputName]) {
+          yield finalOutputs[this.graphOutputName].value;
+        }
       }
+
       if (finalOutputs["cost"]) {
         console.log(`Cost: ${finalOutputs["cost"].value}`);
       }
@@ -243,6 +265,7 @@ export class GraphManager {
       console.error('Error in runGraph:', error);
     } finally {
       console.timeEnd('runGraph');
+      console.log("-----------------------------------------------------");
     }
   }
 }

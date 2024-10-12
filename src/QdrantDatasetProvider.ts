@@ -57,9 +57,14 @@ export class QdrantDatasetProvider implements DatasetProvider {
   private qdrant: QdrantClient;
   private vectorSize: number;
   private static readonly UUID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'; // DNS namespace UUID or any other
-
-  // Define the vector field name consistently as 'vector'
   private static readonly VECTOR_FIELD_NAME = 'vector';
+  
+  /**
+   * Static map to track ongoing collection creation promises.
+   * Key: Collection name
+   * Value: Promise representing the creation process
+   */
+  private static collectionCreationLocks: Map<string, Promise<void>> = new Map();
 
   constructor(qdrantUrl: string, vectorSize: number = 1536, apiKey?: string) {
     this.qdrant = new QdrantClient({
@@ -353,28 +358,79 @@ export class QdrantDatasetProvider implements DatasetProvider {
    * Aligns with the DatasetProvider interface: (metadata: DatasetMetadata) => Promise<void>
    */
   async putDatasetMetadata(metadata: DatasetMetadata): Promise<void> {
-    try {
-      const { id: datasetId, projectId } = metadata;
-      if (!projectId) {
-        throw new Error('ProjectId is required in DatasetMetadata.');
+    const { id: datasetId, projectId } = metadata;
+
+    if (!projectId) {
+      throw new Error('ProjectId is required in DatasetMetadata.');
+    }
+
+    const collectionName = this.getCollectionName(projectId, datasetId);
+
+    // Check if a creation is already in progress for this collection
+    if (QdrantDatasetProvider.collectionCreationLocks.has(collectionName)) {
+      console.log(`[putDatasetMetadata] Collection '${collectionName}' is currently being created. Waiting for the existing creation process to complete.`);
+      await QdrantDatasetProvider.collectionCreationLocks.get(collectionName);
+      console.log(`[putDatasetMetadata] Collection '${collectionName}' has been created by another process.`);
+      return;
+    }
+
+    // Define the creation promise and add it to the lock map
+    const creationPromise = (async () => {
+      try {
+        // Attempt to retrieve the collection to check its existence
+        await this.qdrant.getCollection(collectionName);
+        // If retrieval is successful, the collection exists
+        console.log(`[putDatasetMetadata] Collection '${collectionName}' already exists. Skipping creation.`);
+      } catch (error) {
+        // Determine if the error is due to the collection not existing
+        const isCollectionNotFound =
+          error.response?.data?.code === 'not_found' ||
+          error.message?.toLowerCase().includes('not found');
+
+        if (isCollectionNotFound) {
+          try {
+            // Define the vector field as 'vector' and create the collection
+            await this.qdrant.createCollection(collectionName, {
+              vectors: {
+                [QdrantDatasetProvider.VECTOR_FIELD_NAME]: { // 'vector'
+                  size: this.vectorSize, // Set to 1536 as required
+                  distance: 'Cosine',
+                },
+              },
+              // Removed payload_schema as it's not recognized by Qdrant client
+            });
+
+            console.log(`[putDatasetMetadata] Collection '${collectionName}' created successfully with vector field '${QdrantDatasetProvider.VECTOR_FIELD_NAME}'.`);
+          } catch (createError) {
+            // Handle the case where the collection was created between the check and the creation attempt
+            const isAlreadyExistsError =
+              createError.response?.data?.code === 'collection_already_exists' ||
+              createError.message?.toLowerCase().includes('already exists');
+
+            if (isAlreadyExistsError) {
+              console.log(`[putDatasetMetadata] Collection '${collectionName}' was created by another process. Proceeding without creation.`);
+            } else {
+              console.error('[putDatasetMetadata] Error creating collection:', createError.response?.data || createError.message);
+              throw createError;
+            }
+          }
+        } else {
+          // If the error is not about the collection not existing, rethrow it
+          console.error('[putDatasetMetadata] Error retrieving collection:', error.response?.data || error.message);
+          throw error;
+        }
       }
+    })();
 
-      const collectionName = this.getCollectionName(projectId, datasetId);
-      // Define the vector field as 'vector'
-      await this.qdrant.createCollection(collectionName, {
-        vectors: {
-          [QdrantDatasetProvider.VECTOR_FIELD_NAME]: { // 'vector'
-            size: this.vectorSize, // Set to 1536 as required
-            distance: 'Cosine',
-          },
-        },
-        // Removed payload_schema as it's not recognized by Qdrant client
-      });
+    // Add the creation promise to the lock map
+    QdrantDatasetProvider.collectionCreationLocks.set(collectionName, creationPromise);
 
-      console.log(`[putDatasetMetadata] Collection '${collectionName}' created successfully with vector field '${QdrantDatasetProvider.VECTOR_FIELD_NAME}'.`);
-    } catch (error) {
-      console.error('[putDatasetMetadata] Error in putDatasetMetadata:', error.response?.data || error.message);
-      throw error;
+    try {
+      // Await the creation process
+      await creationPromise;
+    } finally {
+      // Remove the promise from the lock map regardless of success or failure
+      QdrantDatasetProvider.collectionCreationLocks.delete(collectionName);
     }
   }
 
